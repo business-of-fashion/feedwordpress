@@ -12,7 +12,7 @@ require_once(dirname(__FILE__).'/syndicatedpostxpathquery.class.php');
  * different feed formats, which may be useful to FeedWordPress users
  * who make use of feed data in PHP add-ons and filters.
  *
- * @version 2017.1004
+ * @version 2017.1018
  */
 class SyndicatedPost {
 	var $item = null;	// MagpieRSS representation
@@ -43,10 +43,10 @@ class SyndicatedPost {
 	 * @param array $item The item syndicated from the feed.
 	 * @param SyndicatedLink $source The feed it was syndicated from.
 	 */
-	function __construct ($item, &$source) {
+	public function __construct ($item, $source) {
 		global $wpdb;
 
-		if ( empty($item) && empty($source) )
+		if ( empty($item) and empty($source) )
 			return;
 
 		if (is_array($item)
@@ -68,7 +68,7 @@ class SyndicatedPost {
 			$this->item = $item;
 		endif;
 
-		$this->link =& $source;
+		$this->link = $source;
 		$this->feed = $source->magpie;
 		$this->feedmeta = $source->settings;
 
@@ -290,7 +290,7 @@ class SyndicatedPost {
 	 * @returns array of string values representing contents of matching
 	 * elements or attributes
 	 */
-	 function query ($path) {
+	 public function query ($path) {
 		$xq = new SyndicatedPostXPathQuery(array("path" => $path));
 
 		$feedChannel = array_merge(
@@ -342,15 +342,15 @@ class SyndicatedPost {
 		return $matches;
 	} /* SyndicatedPost::get_feed_channel_elements() */
 
-	function get_categories ($params = array()) {
+	public function get_categories ($params = array()) {
 		return $this->entry->get_categories();
 	}
 	
-	function title ($params = array()) {
+	public function title ($params = array()) {
 		return $this->entry->get_title();
 	} /* SyndicatedPost::title () */
 	
-	function content ($params = array()) {
+	public function content ($params = array()) {
 
 		$params = wp_parse_args($params, array(
 		"full only" => false, 
@@ -402,7 +402,7 @@ class SyndicatedPost {
 		return $content;
 	} /* SyndicatedPost::content() */
 
-	function excerpt () {
+	public function excerpt () {
 		# Identify and sanitize excerpt: atom:summary, or rss:description
 		$excerpt = $this->entry->get_description();
 
@@ -433,14 +433,20 @@ class SyndicatedPost {
 		return $excerpt;
 	} /* SyndicatedPost::excerpt() */
 
-	function permalink () {
+	/**
+	 * SyndicatedPost::permalink: returns the permalink for the post, as provided by the
+	 * source feed.
+	 *
+	 * @return string The URL of the original permalink for this syndicated post
+	 */
+	public function permalink () {
 		// Handles explicit <link> elements and also RSS 2.0 cases with
 		// <guid isPermaLink="true">, etc. Hooray!
 		$permalink = $this->entry->get_link();
 		return $permalink;
-	}
+	} /* SyndicatedPost::permalink () */
 
-	function created ($params = array()) {
+	public function created ($params = array()) {
 		$unfiltered = false; $default = NULL;
 		extract($params);
 
@@ -461,7 +467,7 @@ class SyndicatedPost {
 		return $ts;
 	} /* SyndicatedPost::created() */
 
-	function published ($params = array(), $default = NULL) {
+	public function published ($params = array(), $default = NULL) {
 		$fallback = true; $unfiltered = false;
 		if (!is_array($params)) : // Old style
 			$fallback = $params;
@@ -510,7 +516,7 @@ class SyndicatedPost {
 		return $ts;
 	} /* SyndicatedPost::published() */
 
-	function updated ($params = array(), $default = -1) {
+	public function updated ($params = array(), $default = -1) {
 		$fallback = true; $unfiltered = false;
 		if (!is_array($params)) : // Old style
 			$fallback = $params;
@@ -636,7 +642,7 @@ class SyndicatedPost {
 		return $guid;
 	} /* SyndicatedPost::normalize_guid() */
 
-	function guid () {
+	public function guid () {
 		$guid = null;
 		if (isset($this->item['id'])):						// Atom 0.3 / 1.0
 			$guid = $this->item['id'];
@@ -695,7 +701,7 @@ class SyndicatedPost {
 		return $guid;
 	} /* SyndicatedPost::guid() */
 
-	function author () {
+	public function author () {
 		$author = array ();
 
 		$aa = $this->entry->get_authors();
@@ -1454,6 +1460,149 @@ class SyndicatedPost {
 		return $this->_wp_id;
 	}
 
+	/**
+	 * SyndicatedPost::secure_author_id(). Look up, or create, a numeric ID
+	 * for the author of the incoming post.
+	 *
+	 * side effect: int|NULL stored in $this->post['post_author']
+	 * side effect: IF no valid author is found, NULL stored in $this->post 
+	 * side effect: diagnostic output in case item is rejected with NULL author
+	 *
+	 * @used-by SyndicatedPost::store
+	 *
+	 * @uses SyndicatedPost::post
+	 * @uses SyndicatedPost::author_id
+	 * @uses SyndicatedLink::setting
+	 * @uses FeedWordPress::diagnostic
+	 */
+	protected function secure_author_id () {
+		# -- Look up, or create, numeric ID for author
+		$this->post['post_author'] = $this->author_id (
+			$this->link->setting('unfamiliar author', 'unfamiliar_author', 'create')
+		);
+
+		if (is_null($this->post['post_author'])) :
+			FeedWordPress::diagnostic('feed_items:rejected', 'Filtered out item ['.$this->guid().'] without syndication: no author available');
+			$this->post = NULL;
+		endif;
+	} /* SyndicatedPost::secure_author_id() */
+
+	/**
+	 * SyndicatedPost::secure_term_ids(). Look up, or create, numeric IDs
+	 * for the terms (categories, tags, etc.) assigned to the incoming post,
+	 * whether by global settings, feed settings, or by the tags on the feed.
+	 *
+	 * side effect: array of term ids stored in $this->post['tax_input']
+	 * side effect: IF settings or filters determine post should be filtered out,
+	 * 	NULL stored in $this->post
+	 *
+	 * @used-by SyndicatedPost::store
+	 *
+	 * @uses apply_filters
+	 * @uses SyndicatedLink::setting
+	 * @uses SyndicatedPost::category_ids
+	 * @uses SyndicatedPost::preset_terms
+	 * @uses SyndicatedPost::post
+	 */
+	protected function secure_term_ids () {
+		$mapping = apply_filters('syndicated_post_terms_mapping', array(
+			'category' => array('abbr' => 'cats', 'unfamiliar' => 'category', 'domain' => array('category', 'post_tag')),
+			'post_tag' => array('abbr' => 'tags', 'unfamiliar' => 'post_tag', 'domain' => array('post_tag')),
+		), $this);
+
+		$termSet = array(); $valid = null;
+		foreach ($this->feed_terms as $what => $anTerms) :
+			// Default to using the inclusive procedures (for cats) rather than exclusive (for inline tags)
+			$taxes = (isset($mapping[$what]) ? $mapping[$what] : $mapping['category']);
+			$unfamiliar = $taxes['unfamiliar'];
+				
+			if (!is_null($this->post)) : // Not filtered out yet
+				# -- Look up, or create, numeric ID for categories
+				$taxonomies = $this->link->setting("match/".$taxes['abbr'], 'match_'.$taxes['abbr'], $taxes['domain']);
+
+				// Eliminate dummy variables
+				$taxonomies = array_filter($taxonomies, 'remove_dummy_zero');
+
+				// Allow FWP add-on filters to control the taxonomies we use to search for a term
+				$taxonomies = apply_filters("syndicated_post_terms_match", $taxonomies, $what, $this);
+				$taxonomies = apply_filters("syndicated_post_terms_match_${what}", $taxonomies, $this);
+
+				// Allow FWP add-on filters to control with greater precision what happens on unmatched
+				$unmatched = apply_filters("syndicated_post_terms_unfamiliar",
+					$this->link->setting(
+						"unfamiliar {$unfamiliar}",
+						"unfamiliar_{$unfamiliar}",
+						'create:'.$unfamiliar
+					),
+					$what,
+					$this
+				);
+
+				$terms = $this->category_ids (
+					$anTerms,
+					$unmatched,
+					/*taxonomies=*/ $taxonomies,
+					array(
+					  'singleton' => false, // I don't like surprises
+					  'filters' => true,
+					)
+				);
+
+				if (is_null($terms) or is_null($termSet)) :
+					// filtered out -- no matches
+				else :
+					$valid = true;
+
+					// filter mode off, or at least one match
+					foreach ($terms as $tax => $term_ids) :
+						if (!isset($termSet[$tax])) :
+							$termSet[$tax] = array();
+						endif;
+						$termSet[$tax] = array_merge($termSet[$tax], $term_ids);
+					endforeach;
+				endif;
+			endif;
+		endforeach;
+
+		if (is_null($valid)) : // Plonked
+			$this->post = NULL;
+		else : // We can proceed
+			$this->post['tax_input'] = array();
+			foreach ($termSet as $tax => $term_ids) :
+				if (!isset($this->post['tax_input'][$tax])) :
+					$this->post['tax_input'][$tax] = array();
+				endif;
+				$this->post['tax_input'][$tax] = array_merge(
+					$this->post['tax_input'][$tax],
+					$term_ids
+				);
+			endforeach;
+
+			// Now let's add on the feed and global presets
+			foreach ($this->preset_terms as $tax => $term_ids) :
+				if (!isset($this->post['tax_input'][$tax])) :
+					$this->post['tax_input'][$tax] = array();
+				endif;
+
+				$this->post['tax_input'][$tax] = array_merge (
+					$this->post['tax_input'][$tax],
+					$this->category_ids (
+					/*terms=*/ $term_ids,
+					/*unfamiliar=*/ 'create:'.$tax, // These are presets; for those added in a tagbox editor, the tag may not yet exist
+					/*taxonomies=*/ array($tax),
+					array(
+					  'singleton' => true,
+					))
+				);
+			endforeach;
+		endif;
+	} /* SyndicatedPost::secure_term_ids() */
+
+	/**
+	 * SyndicatedPost::store
+	 *
+	 * @uses SyndicatedPost::secure_author_id
+	 */
 	public function store () {
 		global $wpdb;
 
@@ -1463,111 +1612,11 @@ class SyndicatedPost {
 
 		$freshness = $this->freshness();
 		if ($this->has_fresh_content()) :
-			# -- Look up, or create, numeric ID for author
-			$this->post['post_author'] = $this->author_id (
-				$this->link->setting('unfamiliar author', 'unfamiliar_author', 'create')
-			);
-
-			if (is_null($this->post['post_author'])) :
-				FeedWordPress::diagnostic('feed_items:rejected', 'Filtered out item ['.$this->guid().'] without syndication: no author available');
-				$this->post = NULL;
-			endif;
+			$this->secure_author_id();
 		endif;
 
-		// We have to check again in case post has been filtered during
-		// the author_id lookup
-		if ($this->has_fresh_content()) :
-			$mapping = apply_filters('syndicated_post_terms_mapping', array(
-				'category' => array('abbr' => 'cats', 'unfamiliar' => 'category', 'domain' => array('category', 'post_tag')),
-				'post_tag' => array('abbr' => 'tags', 'unfamiliar' => 'post_tag', 'domain' => array('post_tag')),
-			), $this);
-
-			$termSet = array(); $valid = null;
-			foreach ($this->feed_terms as $what => $anTerms) :
-				// Default to using the inclusive procedures (for cats) rather than exclusive (for inline tags)
-				$taxes = (isset($mapping[$what]) ? $mapping[$what] : $mapping['category']);
-				$unfamiliar = $taxes['unfamiliar'];
-				
-				if (!is_null($this->post)) : // Not filtered out yet
-					# -- Look up, or create, numeric ID for categories
-					$taxonomies = $this->link->setting("match/".$taxes['abbr'], 'match_'.$taxes['abbr'], $taxes['domain']);
-
-					// Eliminate dummy variables
-					$taxonomies = array_filter($taxonomies, 'remove_dummy_zero');
-
-					// Allow FWP add-on filters to control the taxonomies we use to search for a term
-					$taxonomies = apply_filters("syndicated_post_terms_match", $taxonomies, $what, $this);
-					$taxonomies = apply_filters("syndicated_post_terms_match_${what}", $taxonomies, $this);
-
-					// Allow FWP add-on filters to control with greater precision what happens on unmatched
-					$unmatched = apply_filters("syndicated_post_terms_unfamiliar",
-						$this->link->setting(
-							"unfamiliar {$unfamiliar}",
-							"unfamiliar_{$unfamiliar}",
-							'create:'.$unfamiliar
-						),
-						$what,
-						$this
-					);
-
-					$terms = $this->category_ids (
-						$anTerms,
-						$unmatched,
-						/*taxonomies=*/ $taxonomies,
-						array(
-						  'singleton' => false, // I don't like surprises
-						  'filters' => true,
-						)
-					);
-
-					if (is_null($terms) or is_null($termSet)) :
-						// filtered out -- no matches
-					else :
-						$valid = true;
-
-						// filter mode off, or at least one match
-						foreach ($terms as $tax => $term_ids) :
-							if (!isset($termSet[$tax])) :
-								$termSet[$tax] = array();
-							endif;
-							$termSet[$tax] = array_merge($termSet[$tax], $term_ids);
-						endforeach;
-					endif;
-				endif;
-			endforeach;
-
-			if (is_null($valid)) : // Plonked
-				$this->post = NULL;
-			else : // We can proceed
-				$this->post['tax_input'] = array();
-				foreach ($termSet as $tax => $term_ids) :
-					if (!isset($this->post['tax_input'][$tax])) :
-						$this->post['tax_input'][$tax] = array();
-					endif;
-					$this->post['tax_input'][$tax] = array_merge(
-						$this->post['tax_input'][$tax],
-						$term_ids
-					);
-				endforeach;
-
-				// Now let's add on the feed and global presets
-				foreach ($this->preset_terms as $tax => $term_ids) :
-					if (!isset($this->post['tax_input'][$tax])) :
-						$this->post['tax_input'][$tax] = array();
-					endif;
-
-					$this->post['tax_input'][$tax] = array_merge (
-						$this->post['tax_input'][$tax],
-						$this->category_ids (
-						/*terms=*/ $term_ids,
-						/*unfamiliar=*/ 'create:'.$tax, // These are presets; for those added in a tagbox editor, the tag may not yet exist
-						/*taxonomies=*/ array($tax),
-						array(
-						  'singleton' => true,
-						))
-					);
-				endforeach;
-			endif;
+		if ($this->has_fresh_content()) : // Was this filtered during author_id lookup?
+			$this->secure_term_ids();
 		endif;
 
 		// We have to check again in case the post has been filtered
@@ -1783,10 +1832,22 @@ class SyndicatedPost {
 		return $ret;
 	} /* function SyndicatedPost::insert_post () */
 
+	/**
+	 * SyndicatedPost::insert_new(). Uses the data collected in this post object to insert
+	 * a new post into the wp_posts table.
+	 *
+	 * @uses SyndicatedPost::insert_post
+	 */
 	function insert_new () {
 		$this->insert_post(/*update=*/ false, 1);
 	} /* SyndicatedPost::insert_new() */
 
+	/**
+	 * SyndicatedPost::insert_new(). Uses the data collected in this post object to update
+	 * an existing post in the wp_posts table.
+	 *
+	 * @uses SyndicatedPost::insert_post
+	 */
 	function update_existing () {
 		$this->insert_post(/*update=*/ true, 2);
 	} /* SyndicatedPost::update_existing() */
@@ -2249,9 +2310,9 @@ EOM;
 				if ($unfamiliar_author === 'create') :
 					$userdata = array();
 
-					// WordPress 3 is going to pitch a fit if we attempt to register
-					// more than one user account with an empty e-mail address, so we
-					// need *something* here. Ugh.
+					#-- we need *something* for the email here or WordPress
+					#-- is liable to pitch a fit. So, make something up if
+					#-- necessary. (Ugh.)
 					if (strlen($email) == 0 or FeedWordPress::is_null_email($email)) :
 						$url = parse_url($hostUrl);
 						$email = $nice_author.'@'.$url['host'];
@@ -2265,13 +2326,17 @@ EOM;
 					$userdata['user_email'] = $email;
 					$userdata['user_url'] = $authorUrl;
 					$userdata['nickname'] = $author;
+
 					$parts = preg_split('/\s+/', trim($author), 2);
 					if (isset($parts[0])) : $userdata['first_name'] = $parts[0]; endif;
 					if (isset($parts[1])) : $userdata['last_name'] = $parts[1]; endif;
+
 					$userdata['display_name'] = $author;
 					$userdata['role'] = 'contributor';
 
-					do { // Keep trying until you get it right. Or until PHP crashes, I guess.
+					#-- loop. Keep trying to add the user until you get it
+					#-- right. Or until PHP crashes, I guess.
+					do {
 						$id = wp_insert_user($userdata);
 						if (is_wp_error($id)) :
 							$codes = $id->get_error_code();
@@ -2282,11 +2347,11 @@ EOM;
 								$userdata['user_login'] .= substr(md5(uniqid(microtime())), 0, 6);
 								break;
 							case 'user_nicename_too_long' :
-								// Add a limited 50 caracters user_nicename based on user_login
+								// Add a limited 50 characters user_nicename based on user_login
                                 				$userdata['user_nicename'] = mb_substr( $userdata['user_login'], 0, 50 );
 								break;
 							case 'existing_user_email' :
-								// No disassemble!
+								// Disassemble email for username, host
 								$parts = explode('@', $userdata['user_email'], 2);
 
 								// Add a random disambiguator as a gmail-style username extension
@@ -2298,6 +2363,14 @@ EOM;
 							endswitch;
 						endif;
 					} while (is_wp_error($id));
+
+					// $id should now contain the numeric ID of a newly minted
+					// user account. Let's mark them as having been generated
+					// by FeedWordPress in the usermeta table, as per the
+					// suggestion of @boonebgorges, in case we need to process,
+					// winnow, filter, or merge syndicated author accounts, &c.
+					add_user_meta($id, 'feedwordpress_generated', 1);
+
 				elseif (is_numeric($unfamiliar_author) and get_userdata((int) $unfamiliar_author)) :
 					$id = (int) $unfamiliar_author;
 				elseif ($unfamiliar_author === 'default') :
