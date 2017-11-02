@@ -3,7 +3,7 @@
 Plugin Name: FeedWordPress
 Plugin URI: http://feedwordpress.radgeek.com/
 Description: simple and flexible Atom/RSS syndication for WordPress
-Version: 2017.1007
+Version: 2017.1028
 Author: C. Johnson
 Author URI: https://feedwordpress.radgeek.com/contact/
 License: GPL
@@ -11,28 +11,25 @@ License: GPL
 
 /**
  * @package FeedWordPress
- * @version 2017.1007
+ * @version 2017.1028
  */
 
-# This uses code derived from:
+# This plugin uses code derived from:
 # -	wp-rss-aggregate.php by Kellan Elliot-McCrea <kellan@protest.net>
 # -	SimplePie feed parser by Ryan Parman, Geoffrey Sneddon, Ryan McCue, et al.
 # -	MagpieRSS feed parser by Kellan Elliot-McCrea <kellan@protest.net>
 # -	Ultra-Liberal Feed Finder by Mark Pilgrim <mark@diveintomark.org>
 # -	WordPress Blog Tool and Publishing Platform <http://wordpress.org/>
+# -	Github contributors @Flynsarmy, @BandonRandon, @david-robinson-practiceweb,
+# 	@daidais, @thegreatmichael, @stedaniels, @alexiskulash, @quassy, @zoul0813,
+# 	@timmmmyboy, and @vobornik
 # according to the terms of the GNU General Public License.
-#
-# INSTALLATION: see readme.txt or <http://feedwordpress.radgeek.com/install>
-#
-# USAGE: once FeedWordPress is installed, you manage just about everything from
-# the WordPress Dashboard, under the Syndication menu. To keep fresh content
-# coming in as it becomes available, you'll have to either check for updates
-# manually, or set up one of the automatically-scheduled update methods. See
-# <http://feedwordpress.radgeek.com/wiki/quick-start/> for some details.
 
-# -- Don't change these unless you know what you're doing...
+####################################################################################
+## CONSTANTS & DEFAULTS ############################################################
+####################################################################################
 
-define ('FEEDWORDPRESS_VERSION', '2017.1007');
+define ('FEEDWORDPRESS_VERSION', '2017.1028');
 define ('FEEDWORDPRESS_AUTHOR_CONTACT', 'http://feedwordpress.radgeek.com/contact');
 
 if (!defined('FEEDWORDPRESS_BLEG')) :
@@ -44,6 +41,7 @@ define('FEEDWORDPRESS_BLEG_PAYPAL', '22PAJZZCK5Z3W');
 // Defaults
 define ('DEFAULT_SYNDICATION_CATEGORY', 'Contributors');
 define ('DEFAULT_UPDATE_PERIOD', 60); // value in minutes
+define ('FEEDWORDPRESS_DEFAULT_CHECKIN_INTERVAL', DEFAULT_UPDATE_PERIOD/10);
 
 if (isset($_REQUEST['feedwordpress_debug'])) :
 	$feedwordpress_debug = $_REQUEST['feedwordpress_debug'];
@@ -63,6 +61,8 @@ define ('FEEDWORDPRESS_CAT_SEPARATOR', "\n");
 define ('FEEDVALIDATOR_URI', 'http://feedvalidator.org/check.cgi');
 
 define ('FEEDWORDPRESS_FRESHNESS_INTERVAL', 10*60); // Every ten minutes
+
+define('FEEDWORDPRESS_BOILERPLATE_DEFAULT_HOOK_ORDER', 11000); // at the tail end of the filtering process
 
 define ('FWP_SCHEMA_HAS_USERMETA', 2966);
 define ('FWP_SCHEMA_USES_ARGS_TAXONOMY', 12694); // Revision # for using $args['taxonomy'] to get link categories
@@ -89,8 +89,9 @@ else :
 	define('FEEDWORDPRESS_FETCH_TIMEOUT_DEFAULT', 20);
 endif;
 
-// Use our the cache settings that we want.
-add_filter('wp_feed_cache_transient_lifetime', array('FeedWordPress', 'cache_lifetime'));
+####################################################################################
+## CORE DEPENDENCIES & PLUGIN MODULES ##############################################
+####################################################################################
 
 // Dependencies: modules packaged with WordPress core
 $wpCoreDependencies = array(
@@ -127,6 +128,8 @@ endif;
 // Dependences: modules packaged with FeedWordPress plugin
 $dir = dirname(__FILE__);
 require_once("${dir}/externals/myphp/myphp.class.php");
+require_once("${dir}/feedwordpressadminpage.class.php");
+require_once("${dir}/feedwordpresssettingsui.class.php");
 require_once("${dir}/admin-ui.php");
 require_once("${dir}/feedwordpresssyndicationpage.class.php");
 require_once("${dir}/compatability.php"); // Legacy API
@@ -144,12 +147,21 @@ require_once("${dir}/feedwordpressrpc.class.php");
 require_once("${dir}/feedwordpresshttpauthenticator.class.php");
 require_once("${dir}/feedwordpresslocalpost.class.php");
 
-// Magic quotes are just about the stupidest thing ever.
+####################################################################################
+## GLOBAL PARAMETERS ###############################################################
+####################################################################################
+
+// $fwp_post used to be a global variable used to make it easier to cope
+// with the frustrating sometime presence of "Magic Quotes" in earlier
+// versions of PHP (<http://php.net/manual/en/security.magicquotes.php>).
+// Magic quotes were DEPRECATED as of PHP 5.3.0, and REMOVED as of PHP
+// 5.4.0, so for the time being $fwp_post just gets a copy of $_POST.
+global $fwp_post;
+
 if (is_array($_POST)) :
 	$fwp_post = $_POST;
-	if (get_magic_quotes_gpc()) :
-		$fwp_post = stripslashes_deep($fwp_post);
-	endif;
+else:
+	$fwp_post = null;
 endif;
 
 // Get the path relative to the plugins directory in which FWP is stored
@@ -164,6 +176,10 @@ if (isset($ref[1])) :
 else : // Something went wrong. Let's just guess.
 	$fwp_path = 'feedwordpress';
 endif;
+
+####################################################################################
+## FEEDWORDPRSS: INITIALIZE OBJECT AND FILTERS #####################################
+####################################################################################
 
 $feedwordpress = new FeedWordPress;
 if (!$feedwordpress->needs_upgrade()) : // only work if the conditions are safe!
@@ -203,6 +219,33 @@ if (!$feedwordpress->needs_upgrade()) : // only work if the conditions are safe!
 	# happens to fuck up any URI with a & to separate GET parameters.
 	remove_filter('pre_link_rss', 'wp_filter_kses');
 	remove_filter('pre_link_url', 'wp_filter_kses');
+
+	# Boilerplate functionality: hook in to title, excerpt, and content to add boilerplate text
+	$hookOrder = get_option('feedwordpress_boilerplate_hook_order', FEEDWORDPRESS_BOILERPLATE_DEFAULT_HOOK_ORDER);
+	add_filter(
+	/*hook=*/ 'the_title',
+	/*function=*/ 'add_boilerplate_title',
+	/*priority=*/ $hookOrder,
+	/*arguments=*/ 2
+	);
+	add_filter(
+	/*hook=*/ 'get_the_excerpt',
+	/*function=*/ 'add_boilerplate_excerpt',
+	/*priority=*/ $hookOrder,
+	/*arguments=*/ 1
+	);
+	add_filter(
+	/*hook=*/ 'the_content',
+	/*function=*/ 'add_boilerplate_content',
+	/*priority=*/ $hookOrder,
+	/*arguments=*/ 1
+	);
+	add_filter(
+	/*hook=*/ 'the_content_rss',
+	/*function=*/ 'add_boilerplate_content',
+	/*priority=*/ $hookOrder,
+	/*arguments=*/ 1
+	);
 
 	# Admin menu
 	add_action('admin_init', array($feedwordpress, 'admin_init'));
@@ -251,6 +294,10 @@ if (!$feedwordpress->needs_upgrade()) : // only work if the conditions are safe!
 
 	add_action('plugins_loaded', array($feedwordpress, 'admin_api'));
 	add_action('all_admin_notices', array($feedwordpress, 'all_admin_notices'));
+
+	// Use our the cache settings that we want.
+	add_filter('wp_feed_cache_transient_lifetime', array('FeedWordPress', 'cache_lifetime'));
+
 
 else :
 	# Hook in the menus, which will just point to the upgrade interface
@@ -929,6 +976,186 @@ function fwp_publish_post_hook ($post_id) {
 	} // function feedwordpress_save_edit_controls
 
 ################################################################################
+## class FeedWordPressBoilerplateReformatter ###################################
+################################################################################
+
+class FeedWordPressBoilerplateReformatter {
+	var $id, $element;
+
+	public function __construct ($id = NULL, $element = 'post') {
+		$this->id = $id;
+		$this->element = $element;
+	}
+
+	function shortcode_methods () {
+		return array(
+			'source' => 'source_link',
+			'source-name' => 'source_name',
+			'source-url' => 'source_url',
+			'original-link' => 'original_link',
+			'original-url' => 'original_url',
+			'author' => 'source_author_link',
+			'author-name' => 'source_author',
+			'feed-setting' => 'source_setting',
+		);
+	}
+	function do_shortcode ($template) {
+		$codes = $this->shortcode_methods();
+
+		// Register shortcodes relative to this object/post ID/element.
+		foreach ($codes as $code => $method) :
+			add_shortcode($code, array($this, $method));
+		endforeach;
+
+		$template = do_shortcode($template);
+		
+		// Unregister shortcodes.
+		foreach ($codes as $code => $method) :
+			remove_shortcode($code);
+		endforeach;
+		
+		return $template;
+	}
+	
+	function source_name ($atts) {
+		$param = shortcode_atts(array(
+		'original' => NULL,
+		), $atts);
+		return get_syndication_source($param['original'], $this->id);
+	}
+	function source_url ($atts) {
+		$param = shortcode_atts(array(
+		'original' => NULL,
+		), $atts);
+		return get_syndication_source_link($param['original'], $this->id);
+	}
+	function source_link ($atts) {
+		switch (strtolower($atts[0])) :
+		case '-name' :
+			$ret = $this->source_name($atts);
+			break;
+		case '-url' :
+			$ret = $this->source_url($atts);
+			break;
+		default :
+			$param = shortcode_atts(array(
+			'original' => NULL,
+			), $atts);
+			if ('title' == $this->element) :
+				$ret = $this->source_name($atts);
+			else :
+				$ret = '<a href="'.htmlspecialchars($this->source_url($atts)).'">'.htmlspecialchars($this->source_name($atts)).'</a>';
+			endif;
+		endswitch;
+		return $ret;
+	}
+	function source_setting ($atts) {
+		$param = shortcode_atts(array(
+		'key' => NULL,
+		), $atts);
+		return get_feed_meta($param['key'], $this->id);
+	}
+	function original_link ($atts, $text) {
+		$url = $this->original_url($atts);
+		return '<a href="'.esc_url($url).'">'.do_shortcode($text).'</a>';
+	}
+	function original_url ($atts) {
+		return get_syndication_permalink($this->id);
+	}
+	function source_author ($atts) {
+		return get_the_author();
+	}
+	function source_author_link ($atts) {
+		switch (strtolower($atts[0])) :
+		case '-name' :
+			$ret = $this->source_author($atts);
+			break;
+		default :
+			global $authordata; // Janky.
+			if ('title' == $this->element) :
+				$ret = $this->source_author($atts);
+			else :
+				$ret = get_the_author();
+				$url = get_author_posts_url((int) $authordata->ID, (int) $authordata->user_nicename);
+				if ($url) :
+					$ret = '<a href="'.$url.'" '
+						.'title="Read other posts by '.esc_html($authordata->display_name).'">'
+						.$ret
+						.'</a>';
+				endif;			
+			endif;
+		endswitch;
+		return $ret;
+	}
+}
+
+function add_boilerplate_reformat ($template, $element, $id = NULL) {
+	if ('post' == $element and !preg_match('/< (p|div) ( \s [^>]+ )? >/xi', $template)) :
+		$template = '<p class="syndicated-attribution">'.$template.'</p>';
+	endif;
+
+	$ref = new FeedWordPressBoilerplateReformatter($id, $element);
+	return $ref->do_shortcode($template);
+}
+
+function add_boilerplate_simple ($element, $title, $id = NULL) {
+	if (is_syndicated($id)) :
+		$meta = get_feed_meta('boilerplate rules', $id);
+		if ($meta and !is_array($meta)) : $meta = unserialize($meta); endif;
+
+		if (!is_array($meta) or empty($meta)) :
+			$meta = get_option('feedwordpress_boilerplate');
+		endif;
+
+		if (is_array($meta) and !empty($meta)) :
+			foreach ($meta as $rule) :
+				if ($element==$rule['element']) :
+					$rule['template'] = add_boilerplate_reformat($rule['template'], $element, $id);
+
+					if ('before'==$rule['placement']) :
+						$title = $rule['template'] . ' ' . $title;
+					else :
+						$title = $title . ' ' . $rule['template'];
+					endif;
+				endif;
+			endforeach;
+		endif;
+	endif;
+	return $title;
+}
+function add_boilerplate_title ($title, $id = NULL) {
+	return add_boilerplate_simple('title', $title, $id);
+}
+function add_boilerplate_excerpt ($title, $id = NULL) {
+	return add_boilerplate_simple('excerpt', $title, $id);
+}
+function add_boilerplate_content ($content) {
+	if (is_syndicated()) :
+		$meta = get_feed_meta('boilerplate rules');
+		if ($meta and !is_array($meta)) : $meta = unserialize($meta); endif;
+
+		if (!is_array($meta) or empty($meta)) :
+			$meta = get_option('feedwordpress_boilerplate');
+		endif;
+
+		if (is_array($meta) and !empty($meta)) :
+			foreach ($meta as $rule) :
+				if ('post'==$rule['element']) :
+					$rule['template'] = add_boilerplate_reformat($rule['template'], 'post');
+
+					if ('before'==$rule['placement']) :
+						$content = $rule['template'] . "\n" . $content;
+					else :
+						$content = $content . "\n" . $rule['template'];
+					endif;
+				endif;
+			endforeach;
+		endif;
+	endif;
+	return $content;	
+}
+
+################################################################################
 ## class FeedWordPress #########################################################
 ################################################################################
 
@@ -978,6 +1205,7 @@ class FeedWordPress {
 		$this->feeds = array ();
 		$this->feedurls  = array();
 		$links = FeedWordPress::syndicated_links();
+
 		if ($links): foreach ($links as $link):
 			$id = intval($link->link_id);
 			$url = $link->link_rss;
@@ -989,8 +1217,12 @@ class FeedWordPress {
 			endif;
 		endforeach; endif;
 
-		add_filter('feedwordpress_update_complete', array($this, 'process_retirements'), 1000, 1);
+		// System-related event hooks
+		add_filter('cron_schedules', array($this, 'cron_schedules'), 10, 1);
 
+		// FeedWordPress-related event hooks
+		add_filter('feedwordpress_update_complete', array($this, 'process_retirements'), 1000, 1);
+		
 		$this->httpauth = new FeedWordPressHTTPAuthenticator;
 	} /* FeedWordPress::__construct () */
 
@@ -1504,10 +1736,6 @@ class FeedWordPress {
 
 			wp_enqueue_style('dashboard');
 			wp_enqueue_style('feedwordpress-elements');
-
-			/*if (function_exists('wp_admin_css')) :
-				wp_admin_css('css/dashboard');
-			endif;*/
 		endif;
 
 		// These are a special post statuses for hiding posts that have
@@ -1556,6 +1784,27 @@ class FeedWordPress {
 		$this->update_magic_url();
 	} /* FeedWordPress::wp_loaded () */
 	
+	/**
+	 * FeedWordPress::cron_schedules(): Filter hook to add WP-Cron schedules
+	 * that plugins like FeedWordPress can use to carry out scheduled events.
+	 *
+	 * @param array $schedules An associative array containing the current set of cron schedules (hourly, daily, etc.)
+	 * @return array The same array, with a new entry ('fwp_checkin_interval') added to the list.
+	 *
+	 * @since 2017.1021
+	 */
+	public function cron_schedules ($schedules) {
+		$interval = FEEDWORDPRESS_DEFAULT_CHECKIN_INTERVAL*60 /*sec/min*/;
+
+		// add 'fwp_checkin_interval' to the existing set
+		$schedules['fwp_checkin_interval'] = array(
+		'interval' => $interval,
+		'display' => 'FeedWordPress update schedule check-in',
+		);
+
+		return $schedules;
+	} /* FeedWordPress::cron_schedules () */
+
 	public function fwp_feeds () {
 		$feeds = array();
 		$feed_ids = $this->feeds;
